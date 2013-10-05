@@ -1553,6 +1553,28 @@ ssl_sock_get_serial(X509 *crt, struct chunk *out)
 	return 1;
 }
 
+/* Extract a public key from a cert, and copy it to a chunk.
+ * Returns 1 if serial is found and copied, 0 if no serial found and
+ * -1 if output is not large enough.
+ */
+static int
+ssl_sock_get_pubkey(X509 *crt, struct chunk *out)
+{
+	ASN1_BIT_STRING *pubkey;
+
+	pubkey = X509_get0_pubkey_bitstr(crt);
+
+	if (!pubkey)
+		return 0;
+
+	if (out->size < pubkey->length)
+		return -1;
+
+	memcpy(out->str, pubkey->data, pubkey->length);
+	out->len = pubkey->length;
+	return 1;
+}
+
 
 /* Copy Date in ASN1_UTCTIME format in struct chunk out.
  * Returns 1 if serial is found and copied, 0 if no valid time found
@@ -2035,6 +2057,41 @@ smp_fetch_ssl_c_sig_alg(struct proxy *px, struct session *l4, void *l7, unsigned
 	X509_free(crt);
 
 	return 1;
+}
+
+/* bin, returns the client certificate public key */
+static int
+smp_fetch_ssl_c_key(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                       const struct arg *args, struct sample *smp, const char *kw)
+{
+	X509 *crt = NULL;
+	int ret = 0;
+	struct chunk *smp_trash;
+
+	if (!l4 || l4->si[0].conn->xprt != &ssl_sock)
+		return 0;
+
+	if (!(l4->si[0].conn->flags & CO_FL_CONNECTED)) {
+		smp->flags |= SMP_F_MAY_CHANGE;
+		return 0;
+	}
+
+	/* SSL_get_peer_certificate, it increase X509 * ref count */
+	crt = SSL_get_peer_certificate(l4->si[0].conn->xprt_ctx);
+	if (!crt)
+		goto out;
+
+	smp_trash = get_trash_chunk();
+	if (ssl_sock_get_pubkey(crt, smp_trash) <= 0)
+		goto out;
+
+	smp->data.str = *smp_trash;
+	smp->type = SMP_T_BIN;
+	ret = 1;
+out:
+	if (crt)
+		X509_free(crt);
+	return ret;
 }
 
 /* str, returns the client certificate key alg */
@@ -3216,6 +3273,7 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 	{ "ssl_c_ca_err_depth",     smp_fetch_ssl_c_ca_err_depth, 0,                   NULL,    SMP_T_UINT, SMP_USE_L5CLI },
 	{ "ssl_c_err",              smp_fetch_ssl_c_err,          0,                   NULL,    SMP_T_UINT, SMP_USE_L5CLI },
 	{ "ssl_c_i_dn",             smp_fetch_ssl_c_i_dn,         ARG2(0,STR,SINT),    NULL,    SMP_T_STR,  SMP_USE_L5CLI },
+	{ "ssl_c_key",              smp_fetch_ssl_c_key,          0,                   NULL,    SMP_T_BIN,  SMP_USE_L5CLI },
 	{ "ssl_c_key_alg",          smp_fetch_ssl_c_key_alg,      0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
 	{ "ssl_c_notafter",         smp_fetch_ssl_c_notafter,     0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
 	{ "ssl_c_notbefore",        smp_fetch_ssl_c_notbefore,    0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
